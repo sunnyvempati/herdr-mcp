@@ -29,11 +29,11 @@ Control and monitor AI coding agents running in [Herdr](https://herdr.dev), a te
 
 | State | Meaning |
 |-------|---------|
-| `idle` | Agent is ready for input, hasn't completed a task yet |
-| `working` | Agent is actively processing |
-| `blocked` | Agent is waiting at an approval or question dialog |
-| `done` | Agent completed its task and is ready for new input |
-| `unknown` | Agent is present but herdr cannot classify its state |
+| `idle` | Ready for input |
+| `working` | Actively processing |
+| `blocked` | Waiting at an approval or question dialog; needs a human decision |
+| `done` | Finished a turn and ready for input, but nobody has looked at it yet |
+| `unknown` | An agent is present but herdr can't classify it. This does not mean its work succeeded |
 
 ## Read-only tools (always available)
 
@@ -46,16 +46,16 @@ Control and monitor AI coding agents running in [Herdr](https://herdr.dev), a te
 - `herdr_agent_read` — Read terminal output (use `lines: 100` for more context)
 - `herdr_agent_wait` — Wait for an agent to reach a state
 
-## Write tools (require HERDR_MCP_ALLOW_WRITE=1)
+## Write tools (only offered when HERDR_MCP_ALLOW_WRITE=1)
 
-Write operations are disabled by default for safety. When enabled:
+Write mode is off by default, and while it's off these tools don't appear in your tool list at all. If the user asks for a write action and the tools are missing, tell them write mode is off and that they can enable it by setting `HERDR_MCP_ALLOW_WRITE=1` in the plugin or MCP settings. Don't look for a workaround.
 
-- `herdr_tab_create` — Create a new tab with an empty shell pane
+- `herdr_tab_create` — Create a tab whose root pane is an empty shell. It doesn't take focus unless `focus: true`
 - `herdr_agent_start` — Start an agent in a pane
 - `herdr_agent_prompt` — Send a prompt to an agent
-- `herdr_agent_send_keys` — Send key sequences (esc, ctrl+c, enter)
+- `herdr_agent_send_keys` — Send key presses, space-separated (`esc`, `ctrl+c`, `down enter`)
 - `herdr_agent_rename` — Rename an agent
-- `herdr_pane_close` — Close a pane
+- `herdr_pane_close` — Close a pane and kill whatever runs in it
 
 ## The start-then-prompt recipe
 
@@ -107,9 +107,9 @@ When an agent is `blocked`, it's waiting at an approval dialog or question. Read
 
 ### Timeouts
 
-- `herdr_agent_wait` and `herdr_agent_prompt --wait` have a default 2-minute timeout
-- For long-running tasks, use `timeout_ms` up to 300000 (5 minutes)
-- If a prompt times out, check `herdr_agent_get` — the agent may still be working
+- `herdr_agent_wait` and `herdr_agent_prompt` with `wait: true` default to a 2-minute timeout
+- For long-running tasks, use `timeout_ms` up to 300000 (5 minutes). `timeout_ms` only applies when `wait` is true
+- A `timeout` or `agent_prompt_stalled` error doesn't prove the prompt was lost. Check `herdr_agent_get` or `herdr_agent_read` before retrying, so you don't send it twice
 
 ## Example workflows
 
@@ -152,12 +152,18 @@ User: "Wait for the feature-agent to be done"
 
 | Error code | Meaning | What to do |
 |------------|---------|------------|
-| `herdr_not_found` | herdr not installed | Tell user to install from herdr.dev |
-| `server_not_running` | herdr server not running | Tell user to start herdr |
-| `agent_blocked` | Can't prompt, agent at dialog | Read output, ask user how to proceed |
-| `agent_prompt_stalled` | Prompt sent but no activity | Check agent state, may need retry |
-| `timeout` | Operation timed out | Check agent state, it may still be working |
+| `herdr_not_found` | herdr isn't installed or isn't on PATH | Tell the user to install it from herdr.dev |
+| `server_not_running` | No herdr server is running | Tell the user to start herdr |
+| `agent_not_found` | No live agent has that name or pane ID | Run `herdr_agent_list` and use a current name or pane ID |
+| `agent_blocked` | Can't prompt; the agent is at a dialog | Read the output and ask the user how to proceed |
+| `agent_not_ready` | The agent was blocked during startup | Read its output; it can take prompts once it's idle |
+| `agent_prompt_stalled` | Prompt sent, but no activity seen within 5s | Check the agent before retrying |
+| `timeout` | herdr or herdr-mcp gave up waiting | Check the agent; it may still be working |
+| `cancelled` | The request was cancelled | Nothing to do |
+| `invalid_argument` | An input failed validation before herdr ran | Fix the input; IDs look like `w1`, `w1:t2`, `w1:p3` |
+| `cli_syntax_error` | herdr rejected the arguments (e.g. an unsupported agent kind) | Read the message and fix the input |
+| `output_too_large` | The output exceeded herdr-mcp's size cap | Ask for fewer `lines` |
 
 ## Remote machines
 
-When `HERDR_MCP_MACHINE` is set, all commands target a remote herdr server via SSH machine forwarding. The machine label must be a saved profile in herdr (`herdr machine list`).
+When `HERDR_MCP_MACHINE` is set, every command targets that saved herdr machine over SSH (`herdr machine list` shows the options). IDs and agent names belong to that machine's server, so don't reuse IDs from a local listing.

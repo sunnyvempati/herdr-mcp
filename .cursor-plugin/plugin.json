@@ -4,11 +4,10 @@
   "description": "Monitor and control AI coding agents running in Herdr terminal workspaces",
   "version": "0.1.0",
   "author": {
-    "name": "Herdr",
-    "email": "plugins@herdr.dev"
+    "name": "sunnyvempati"
   },
-  "homepage": "https://herdr.dev",
-  "repository": "https://github.com/herdrdev/herdr-mcp",
+  "homepage": "https://github.com/sunnyvempati/herdr-mcp#readme",
+  "repository": "https://github.com/sunnyvempati/herdr-mcp",
   "license": "MIT",
   "keywords": ["herdr", "terminal", "agents", "claude", "codex", "grok", "mcp"],
   "category": "productivity",
@@ -18,13 +17,13 @@
       "HERDR_MCP_ALLOW_WRITE": {
         "type": "string",
         "title": "Enable write operations",
-        "description": "Set to '1' to enable write tools (tab create, agent start, prompt, send-keys, rename, close). Leave empty for read-only mode.",
+        "description": "Set to '1' to add the write tools (tab create, agent start, prompt, send-keys, rename, pane close). Leave empty for read-only mode, where those tools are not offered at all.",
         "default": ""
       },
       "HERDR_MCP_MACHINE": {
         "type": "string",
         "title": "Remote machine",
-        "description": "Optional: Target a remote herdr server via saved SSH machine label or ID.",
+        "description": "Optional: a saved herdr machine label or profile ID (see `herdr machine list`) to target instead of the local server.",
         "default": ""
       }
     }

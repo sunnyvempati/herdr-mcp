@@ -49,41 +49,43 @@
 
 ## Quick Install
 
+Every snippet below starts herdr-mcp **read-only**. See [Safety Model](#safety-model) to turn on write tools.
+
 ### Grok Bot (X plugin marketplace)
 
-Install the **herdr-mcp** plugin from the Grok Bot marketplace. Enable write mode in plugin settings if needed.
+Install the **herdr-mcp** plugin from the Grok Bot marketplace. To let the assistant start or prompt agents, set **Enable write operations** to `1` in the plugin settings.
 
 ### Cursor
 
-Add to your MCP settings (`.cursor/mcp.json`):
+Add to `.cursor/mcp.json` in your project, or `~/.cursor/mcp.json` for all projects:
 
 ```json
 {
   "mcpServers": {
     "herdr": {
       "command": "npx",
-      "args": ["herdr-mcp"],
-      "env": {
-        "HERDR_MCP_ALLOW_WRITE": "1"
-      }
+      "args": ["-y", "herdr-mcp"]
     }
   }
 }
 ```
 
+### Claude Code
+
+```bash
+claude mcp add herdr -- npx -y herdr-mcp
+```
+
 ### Claude Desktop
 
-Add to your Claude config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS:
 
 ```json
 {
   "mcpServers": {
     "herdr": {
       "command": "npx",
-      "args": ["herdr-mcp"],
-      "env": {
-        "HERDR_MCP_ALLOW_WRITE": "1"
-      }
+      "args": ["-y", "herdr-mcp"]
     }
   }
 }
@@ -92,74 +94,88 @@ Add to your Claude config (`~/Library/Application Support/Claude/claude_desktop_
 ### Any MCP Client
 
 ```bash
-npx herdr-mcp
+npx -y herdr-mcp
 ```
 
-Set `HERDR_MCP_ALLOW_WRITE=1` to enable write operations.
+herdr-mcp speaks MCP over stdio and needs the `herdr` binary on `PATH` (Node.js 20+).
 
 ---
 
 ## Safety Model
 
-**herdr-mcp is read-only by default.** This protects your agents from accidental or unintended modifications.
+**herdr-mcp is read-only by default.** Assistants can watch your agents but can't change anything until you opt in.
 
-| Mode | Tools Available | Enable With |
-|------|-----------------|-------------|
-| **Read-only** (default) | status, list, get, read, wait | Nothing—always on |
-| **Read + Write** | All tools | `HERDR_MCP_ALLOW_WRITE=1` |
+| Mode | Tools offered | Enable with |
+|------|---------------|-------------|
+| **Read-only** (default) | The 8 read tools | Nothing |
+| **Read + write** | The 8 read tools plus the 6 write tools | `HERDR_MCP_ALLOW_WRITE=1` (exactly `1`) |
 
-**No shell passthrough.** Unlike raw terminal access, herdr-mcp never exposes arbitrary shell execution. Every operation goes through herdr's structured CLI.
+To opt in, add an `env` block to the server config:
+
+```json
+"env": { "HERDR_MCP_ALLOW_WRITE": "1" }
+```
+
+In read-only mode the write tools aren't registered: they don't appear in the assistant's tool list, and calling one by name fails before herdr ever runs.
+
+- **No shell passthrough.** There is no tool for herdr's `pane run` or `pane send-text`, or anything else that runs an arbitrary command. herdr is launched with an argument array and no shell, so nothing is interpolated.
+- **No flag injection.** IDs, agent names, kinds, and keys are validated so they can't be read as herdr options. Prompt text goes in herdr's verbatim text slot, so a prompt like `--wait` stays text.
+- **Bounded calls.** Every herdr call has a timeout (5 minutes at most for waits), a 256 KiB output cap, and is cancelled when the client cancels the request. A herdr process that ignores SIGTERM gets SIGKILL.
+- **Tool annotations.** Read tools are marked `readOnlyHint`. `herdr_agent_prompt`, `herdr_agent_send_keys`, and `herdr_pane_close` are marked `destructiveHint`, so clients that honor annotations can ask before running them.
+
+One caveat for write mode: `herdr_agent_start` passes `agent_args` straight through to the agent's own CLI. Those can include flags that loosen the agent's safety settings, so only approve args you'd type yourself.
 
 ---
 
 ## Tools
 
-### Read-Only Tools (always available)
+Tool names are stable across releases.
+
+### Read-only tools (always offered)
 
 | Tool | Description |
 |------|-------------|
-| `herdr_status` | Check if herdr is running and responsive |
-| `herdr_workspace_list` | List all terminal workspaces |
-| `herdr_tab_list` | List tabs in a workspace |
-| `herdr_pane_list` | List panes in a tab |
-| `herdr_agent_list` | List all agents with status (idle/working/blocked/done) |
-| `herdr_agent_get` | Get details for a specific agent |
-| `herdr_agent_read` | Read recent terminal output from an agent's pane |
-| `herdr_agent_wait` | Wait for agent state change with timeout |
+| `herdr_status` | Check that the herdr server is running and report its version |
+| `herdr_workspace_list` | List workspaces |
+| `herdr_tab_list` | List tabs, optionally in one workspace |
+| `herdr_pane_list` | List panes, optionally in one workspace |
+| `herdr_agent_list` | List agents with status (idle/working/blocked/done/unknown) |
+| `herdr_agent_get` | Get one agent's status, pane, cwd, and session info |
+| `herdr_agent_read` | Read recent terminal output from an agent as plain text |
+| `herdr_agent_wait` | Wait until an agent reaches a status, with a timeout |
 
-### Write Tools (require `HERDR_MCP_ALLOW_WRITE=1`)
+### Write tools (offered only with `HERDR_MCP_ALLOW_WRITE=1`)
 
 | Tool | Description |
 |------|-------------|
-| `herdr_tab_create` | Create a new tab in a workspace |
-| `herdr_pane_close` | Close a terminal pane |
-| `herdr_agent_start` | Start a new agent in a pane |
-| `herdr_agent_prompt` | Send a prompt to a running agent |
-| `herdr_agent_send_keys` | Send raw keystrokes to an agent's pane |
+| `herdr_tab_create` | Create a tab whose root pane is an empty shell; doesn't take focus unless `focus: true` |
+| `herdr_agent_start` | Start an agent (`claude`, `codex`, `cursor`, `grok`, ...) in a pane at a shell prompt |
+| `herdr_agent_prompt` | Send a prompt to an agent, optionally waiting for it to settle |
+| `herdr_agent_send_keys` | Send key presses such as `esc`, `ctrl+c`, or `down enter` |
 | `herdr_agent_rename` | Rename an agent |
+| `herdr_pane_close` | Close a pane and kill whatever runs in it |
 
 ---
 
 ## Remote Machines
 
-Target agents on remote machines by setting `HERDR_MCP_MACHINE`:
+Point herdr-mcp at a machine you've saved in herdr (`herdr machine add`, then `herdr machine list`):
 
 ```json
 {
   "mcpServers": {
-    "herdr-remote": {
+    "herdr-workbox": {
       "command": "npx",
-      "args": ["herdr-mcp"],
+      "args": ["-y", "herdr-mcp"],
       "env": {
-        "HERDR_MCP_MACHINE": "my-server",
-        "HERDR_MCP_ALLOW_WRITE": "1"
+        "HERDR_MCP_MACHINE": "Build machine"
       }
     }
   }
 }
 ```
 
-This passes `--machine my-server` to all herdr commands, routing operations through SSH to the specified machine.
+Every command is sent as `herdr --machine "Build machine" ...`, which herdr forwards over SSH to that machine's server. The value must be a saved profile label or ID, not a hostname. Workspace, pane, and agent IDs belong to that machine. To watch several machines, add one server entry per machine.
 
 ---
 
@@ -177,49 +193,48 @@ Always check agent status before taking action:
 
 ### Start-then-prompt recipe
 
-When spinning up a new agent:
+When the user asks for a new agent:
 
 ```
-1. herdr_agent_start → launch agent in specified pane
-2. herdr_agent_wait → wait for "idle" state (agent ready for input)
-3. herdr_agent_prompt → send initial task
+1. herdr_tab_create  → returns root_pane.pane_id, an empty shell
+2. herdr_agent_start → returns once the agent is ready for input
+3. herdr_agent_prompt → send the task the user approved
 ```
 
 ### Critical caveat
 
-**The target pane must be at a shell prompt before `agent_start`.** If the pane is running another process, the start command will fail or produce unexpected results.
+**The target pane must be at an idle shell prompt before `herdr_agent_start`.** herdr refuses to start an agent in a pane that's running anything else, so create a fresh tab first.
+
+The bundled [`skills/herdr/SKILL.md`](skills/herdr/SKILL.md) teaches assistants these patterns, along with herdr's error codes and when to ask a human.
 
 ---
 
 ## Development
 
 ```bash
-# Clone and install
 git clone https://github.com/sunnyvempati/herdr-mcp.git
 cd herdr-mcp
-npm install
-
-# Build
+npm ci
 npm run build
-
-# Test
-npm test
-
-# Run locally
-node build/index.js
+npm test            # MCP-surface and runner tests against a fake herdr
+npm run typecheck
 ```
 
-### Smoke test (requires herdr installed)
+The tests drive the built server through the official MCP client. `src/test/fake-herdr.ts` stands in for the herdr binary: it enforces herdr 0.9.5's argument grammar and replies with output captured from real herdr.
+
+### Smoke test (requires herdr with a running server)
 
 ```bash
-./scripts/smoke.sh
+npm run smoke       # or ./scripts/smoke.sh
 ```
+
+It exercises every read-only tool against your real herdr and never enables write mode. Set `HERDR_MCP_MACHINE` to smoke-test a remote machine.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents (and humans) should read [AGENTS.md](AGENTS.md) for the engineering principles this repo follows.
 
 ---
 
