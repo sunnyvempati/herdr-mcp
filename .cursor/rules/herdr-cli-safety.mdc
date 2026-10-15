@@ -1,0 +1,14 @@
+---
+description: Invariants for code that builds herdr commands or registers MCP tools
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+Follow AGENTS.md (house layer and the pinned Matt Pocock skills). When editing `src/`, these are non-negotiable:
+
+- herdr runs only via `spawn(bin, argv, { shell: false })` inside `src/herdr.ts`. No `exec`, no `shell: true`, no command strings.
+- Every positional operand passes a pattern that can't start with `-`. Prompt text sits in herdr's verbatim slot, our flags come after it, and there is no `--` before it.
+- No tool may run an arbitrary command (`pane run`, `pane send-text`, or similar).
+- State-changing tools are registered only after the `config.allowWrite` check in `src/server.ts`.
+- Each herdr call keeps its timeout, output cap, and cancellation signal.
+- A new herdr flag must be confirmed against the real CLI and added to `src/test/fake-herdr.ts`.
