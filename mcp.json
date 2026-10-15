@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "herdr": {
+      "command": "npx",
+      "args": ["herdr-mcp"],
+      "env": {
+        "HERDR_MCP_ALLOW_WRITE": "${HERDR_MCP_ALLOW_WRITE}",
+        "HERDR_MCP_MACHINE": "${HERDR_MCP_MACHINE}"
+      }
+    }
+  }
+}

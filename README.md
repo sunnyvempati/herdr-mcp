@@ -220,6 +220,50 @@ To submit this plugin to the [Grok Bot Plugin Marketplace](https://x.ai/bot/mark
 
 The plugin manifest format for Cursor/Grok Bot uses the MCP server protocol. No additional manifest file is required beyond the `mcp.json` configuration shown above.
 
+## Cursor Plugin Format
+
+This repository is packaged as a **Cursor Plugin** that bundles the MCP server with a skill file teaching assistants how to use herdr effectively.
+
+### Plugin structure
+
+```
+herdr-mcp/
+├── .cursor-plugin/
+│   └── plugin.json        # Cursor Plugin manifest
+├── skills/
+│   └── herdr/
+│       └── SKILL.md       # Skill teaching monitor-first, start-then-prompt
+├── mcp.json               # MCP server configuration
+├── build/                 # Compiled MCP server
+└── ...
+```
+
+### What the skill teaches
+
+The `skills/herdr/SKILL.md` file teaches AI assistants:
+
+- **Monitor first** — Always check agent status before acting
+- **The start-then-prompt recipe** — Create tab → start agent → prompt
+- **Pane must be at shell prompt** — Critical caveat for agent start
+- **Ask the human before prompting** — Never send prompts without explicit user approval
+- **Handle blocked agents** — Read output, let user decide
+
+### Installing as a Cursor Plugin
+
+For plugin-based installation (with skill file):
+
+1. Submit to [cursor.com/marketplace/publish](https://cursor.com/marketplace/publish)
+2. Or install from git: Cursor Settings → Plugins → Install from URL
+
+### Plugin variables
+
+| Variable | Description |
+|----------|-------------|
+| `HERDR_MCP_ALLOW_WRITE` | Set to `1` to enable write tools |
+| `HERDR_MCP_MACHINE` | Target a remote herdr server |
+
+Variables are configured in the Cursor dashboard under Plugins → Configure.
+
 ## Development
 
 ```bash
@@ -237,6 +281,12 @@ npm test
 # Watch mode during development
 npm run dev
 ```
+
+## Sources
+
+- [Cursor Plugins Reference](https://cursor.com/docs/reference/plugins) — Official plugin format documentation
+- [Cursor Plugin Schema](https://raw.githubusercontent.com/cursor/plugins/main/schemas/plugin.schema.json) — JSON Schema for plugin.json
+- [Grok Bot Plugin Marketplace Submission](https://x.ai/bot/marketplace/submit-a-plugin) — Marketplace submission form
 
 ## License
 
