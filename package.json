@@ -8,11 +8,15 @@
   },
   "main": "./build/index.js",
   "scripts": {
-    "build": "tsc && chmod 755 build/index.js",
+    "clean": "node -e \"require('node:fs').rmSync('build', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc && chmod 755 build/index.js",
+    "typecheck": "tsc --noEmit",
     "start": "node build/index.js",
     "dev": "tsc --watch",
-    "test": "node --test build/test/*.test.js",
-    "prepublishOnly": "npm run build"
+    "test": "node --test --test-timeout=20000 build/test/*.test.js",
+    "smoke": "node scripts/smoke.mjs",
+    "render:assets": "node scripts/render-assets.mjs",
+    "prepublishOnly": "npm run build && npm test"
   },
   "repository": {
     "type": "git",
@@ -31,17 +35,13 @@
     "cursor",
     "grok"
   ],
-  "author": "",
+  "author": "sunnyvempati",
   "license": "MIT",
   "files": [
-    "build/index.js",
-    "build/index.js.map",
-    "build/index.d.ts",
-    "build/index.d.ts.map",
-    "build/herdr.js",
-    "build/herdr.js.map",
-    "build/herdr.d.ts",
-    "build/herdr.d.ts.map",
+    "build/*.js",
+    "build/*.js.map",
+    "build/*.d.ts",
+    "build/*.d.ts.map",
     "README.md",
     "LICENSE"
   ],
@@ -49,13 +49,13 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
-    "zod": "^4.0.0"
+    "@modelcontextprotocol/server": "^2.3.1",
+    "zod": "^4.2.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
     "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^22.0.0",
-    "sharp": "^0.35.5",
     "typescript": "^5.0.0"
   }
 }

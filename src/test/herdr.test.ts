@@ -1,277 +1,96 @@
-import { test, describe, before, after, beforeEach } from "node:test";
-import assert from "node:assert";
-import { writeFile, mkdir, chmod, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import {
-  execHerdr,
-  getStatus,
-  listAgents,
-  listWorkspaces,
-  listTabs,
-  listPanes,
-  getAgent,
-  readAgent,
-  isWriteAllowed,
-} from "../herdr.js";
+import { describe, test, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { createHerdrClient, type HerdrClientOptions, type Result } from "../herdr.js";
+import { fakeHerdr, type FakeHerdr, type FakeReply } from "./harness.js";
 
-const FIXTURES = {
-  status: {
-    result: {
-      server: { running: true, version: "0.9.5", session: "default" },
-      client: { version: "0.9.5" },
-    },
-  },
-  agentList: {
-    id: "cli:agent:list",
-    result: {
-      type: "agent_list",
-      agents: [
-        {
-          agent: "claude",
-          agent_status: "idle",
-          pane_id: "w1:p1",
-          tab_id: "w1:t1",
-          workspace_id: "w1",
-          terminal_title: "claude-reviewer",
-          cwd: "/home/user/project",
-          focused: true,
-        },
-        {
-          agent: "claude",
-          agent_status: "working",
-          pane_id: "w2:p1",
-          tab_id: "w2:t1",
-          workspace_id: "w2",
-          terminal_title: "feature-work",
-          cwd: "/home/user/other",
-          focused: false,
-        },
-        {
-          agent: "codex",
-          agent_status: "blocked",
-          pane_id: "w3:p1",
-          tab_id: "w3:t1",
-          workspace_id: "w3",
-          terminal_title: "needs-approval",
-          cwd: "/home/user/third",
-          focused: false,
-        },
-      ],
-    },
-  },
-  workspaceList: {
-    result: {
-      workspaces: [
-        { workspace_id: "w1", name: "project-a", focused: true },
-        { workspace_id: "w2", name: "project-b", focused: false },
-      ],
-    },
-  },
-  tabList: {
-    result: {
-      tabs: [
-        { tab_id: "w1:t1", workspace_id: "w1", name: "main", focused: true },
-        { tab_id: "w1:t2", workspace_id: "w1", name: "logs", focused: false },
-      ],
-    },
-  },
-  paneList: {
-    result: {
-      panes: [
-        { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", focused: true },
-        { pane_id: "w1:p2", tab_id: "w1:t1", workspace_id: "w1", focused: false },
-      ],
-    },
-  },
-  agentGet: {
-    result: {
-      agent: "claude",
-      agent_status: "idle",
-      pane_id: "w1:p1",
-      tab_id: "w1:t1",
-      workspace_id: "w1",
-      terminal_title: "claude-reviewer",
-      cwd: "/home/user/project",
-      focused: true,
-      revision: 5,
-      state_change_seq: 42,
-    },
-  },
-  agentRead: {
-    result: {
-      content: "Agent output line 1\nAgent output line 2\n> Ready for input",
-      source: "recent-unwrapped",
-      lines: 3,
-    },
-  },
-};
+let fake: FakeHerdr | undefined;
 
-let fakeHerdrDir: string;
-let fakeHerdrPath: string;
-let originalPath: string;
-
-async function createFakeHerdr(scriptContent: string): Promise<void> {
-  await writeFile(fakeHerdrPath, scriptContent, "utf-8");
-  await chmod(fakeHerdrPath, 0o755);
-}
-
-function makeSuccessScript(responses: Record<string, unknown>): string {
-  return `#!/usr/bin/env node
-const args = process.argv.slice(2);
-const responses = ${JSON.stringify(responses)};
-
-// Handle different command patterns
-const cmd = args.filter(a => !a.startsWith('--')).join(' ');
-
-// Check for specific commands
-if (cmd === 'status --json' || cmd === 'status') {
-  console.log(JSON.stringify(responses.status || {}));
-} else if (cmd === 'agent list' || cmd.includes('agent list')) {
-  console.log(JSON.stringify(responses.agentList || {}));
-} else if (cmd.startsWith('agent get')) {
-  console.log(JSON.stringify(responses.agentGet || {}));
-} else if (cmd.startsWith('agent read')) {
-  console.log(JSON.stringify(responses.agentRead || {}));
-} else if (cmd === 'workspace list --json' || cmd.includes('workspace list')) {
-  console.log(JSON.stringify(responses.workspaceList || {}));
-} else if (cmd.includes('tab list')) {
-  console.log(JSON.stringify(responses.tabList || {}));
-} else if (cmd.includes('pane list')) {
-  console.log(JSON.stringify(responses.paneList || {}));
-} else {
-  console.log('{}');
-}
-`;
-}
-
-describe("herdr CLI executor", () => {
-  before(async () => {
-    fakeHerdrDir = join(tmpdir(), `herdr-mcp-test-${Date.now()}`);
-    fakeHerdrPath = join(fakeHerdrDir, "herdr");
-    await mkdir(fakeHerdrDir, { recursive: true });
-    originalPath = process.env.PATH || "";
-    process.env.PATH = `${fakeHerdrDir}:${originalPath}`;
-  });
-
-  after(async () => {
-    process.env.PATH = originalPath;
-    await rm(fakeHerdrDir, { recursive: true, force: true });
-  });
-
-  beforeEach(async () => {
-    await createFakeHerdr(makeSuccessScript(FIXTURES));
-  });
-
-  test("getStatus returns server info", async () => {
-    const result = await getStatus();
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.strictEqual(result.data.server?.running, true);
-    assert.strictEqual(result.data.server?.version, "0.9.5");
-  });
-
-  test("listAgents returns agent list", async () => {
-    const result = await listAgents();
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.strictEqual(result.data.agents.length, 3);
-    assert.strictEqual(result.data.agents[0].agent_status, "idle");
-    assert.strictEqual(result.data.agents[1].agent_status, "working");
-    assert.strictEqual(result.data.agents[2].agent_status, "blocked");
-  });
-
-  test("listWorkspaces returns workspace list", async () => {
-    const result = await listWorkspaces();
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.strictEqual(result.data.workspaces.length, 2);
-  });
-
-  test("listTabs returns tab list", async () => {
-    const result = await listTabs("w1");
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.strictEqual(result.data.tabs.length, 2);
-  });
-
-  test("listPanes returns pane list", async () => {
-    const result = await listPanes("w1");
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.strictEqual(result.data.panes.length, 2);
-  });
-
-  test("getAgent returns agent info", async () => {
-    const result = await getAgent("reviewer");
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.strictEqual(result.data.agent_status, "idle");
-  });
-
-  test("readAgent returns terminal content", async () => {
-    const result = await readAgent("reviewer", { lines: 50 });
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.ok(result.data.content.includes("Agent output"));
-  });
-
-  test("handles server error response", async () => {
-    const errorScript = `#!/usr/bin/env node
-console.error(JSON.stringify({ code: "server_not_running", message: "herdr server is not running" }));
-process.exit(1);
-`;
-    await createFakeHerdr(errorScript);
-    const result = await getStatus();
-    assert.strictEqual(result.success, false);
-    assert.strictEqual(result.error?.code, "server_not_running");
-  });
-
-  test("handles herdr not found", async () => {
-    const oldPath = process.env.PATH;
-    process.env.PATH = "/nonexistent";
-    const result = await execHerdr(["status"]);
-    process.env.PATH = oldPath;
-    assert.strictEqual(result.success, false);
-    assert.strictEqual(result.error?.code, "herdr_not_found");
-  });
-
-  test("handles timeout", async () => {
-    const sleepScript = `#!/usr/bin/env node
-setTimeout(() => {}, 60000);
-`;
-    await createFakeHerdr(sleepScript);
-    const result = await execHerdr(["status"], { timeout: 100 });
-    assert.strictEqual(result.success, false);
-    assert.strictEqual(result.error?.code, "timeout");
-  });
-
-  test("passes --machine flag when specified", async () => {
-    const machineScript = `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args[0] === '--machine' && args[1] === 'my-server') {
-  console.log(JSON.stringify({ result: { machine: 'my-server', connected: true } }));
-} else {
-  console.log(JSON.stringify({ result: { machine: null } }));
-}
-`;
-    await createFakeHerdr(machineScript);
-    const result = await execHerdr(["status"], { machine: "my-server" });
-    assert.strictEqual(result.success, true);
-    assert.ok(result.data);
-    assert.deepStrictEqual(result.data, { machine: "my-server", connected: true });
-  });
+afterEach(() => {
+  fake?.cleanup();
+  fake = undefined;
 });
 
-describe("write permission guard", () => {
-  test("isWriteAllowed returns false by default", () => {
-    delete process.env.HERDR_MCP_ALLOW_WRITE;
-    assert.strictEqual(isWriteAllowed(), false);
+function clientFor(scenario: Record<string, FakeReply>, options: HerdrClientOptions = {}) {
+  fake = fakeHerdr(scenario);
+  Object.assign(process.env, fake.env);
+  return createHerdrClient({ bin: fake.bin, ...options });
+}
+
+function errorCode(result: Result<unknown>): string | undefined {
+  return result.ok ? undefined : result.error.code;
+}
+
+describe("herdr runner", () => {
+  test("reports a missing herdr binary", async () => {
+    const herdr = createHerdrClient({ bin: "/nonexistent/herdr" });
+    const result = await herdr.listAgents();
+    assert.equal(errorCode(result), "herdr_not_found");
   });
 
-  test("isWriteAllowed returns true when set", () => {
-    process.env.HERDR_MCP_ALLOW_WRITE = "1";
-    assert.strictEqual(isWriteAllowed(), true);
-    delete process.env.HERDR_MCP_ALLOW_WRITE;
+  test("reports usage errors with herdr's message", async () => {
+    const herdr = clientFor({ "agent list": { exit: 2, stderr: "unknown option: --json\n" } });
+    assert.deepEqual(await herdr.listAgents(), {
+      ok: false,
+      error: { code: "cli_syntax_error", message: "unknown option: --json" },
+    });
+  });
+
+  test("unwraps the result envelope", async () => {
+    const herdr = clientFor({});
+    const result = await herdr.listAgents();
+    assert.equal(result.ok, true);
+    assert.equal((result as { value: { type: string } }).value.type, "agent_list");
+  });
+
+  test("rejects non-JSON output from a JSON command", async () => {
+    const herdr = clientFor({ "agent list": { stdout: "not json" } });
+    assert.equal(errorCode(await herdr.listAgents()), "parse_error");
+  });
+
+  test("kills herdr when it exceeds the timeout", async () => {
+    const herdr = clientFor({ "agent list": { hang: true } }, { defaultTimeoutMs: 200 });
+    const started = Date.now();
+    assert.equal(errorCode(await herdr.listAgents()), "timeout");
+    assert.ok(Date.now() - started < 3_000);
+  });
+
+  test("escalates to SIGKILL when herdr ignores SIGTERM", async () => {
+    const herdr = clientFor(
+      { "agent list": { hang: true, ignoreSigterm: true } },
+      { defaultTimeoutMs: 200, killGraceMs: 200 }
+    );
+    const started = Date.now();
+    assert.equal(errorCode(await herdr.listAgents()), "timeout");
+    assert.ok(Date.now() - started < 3_000);
+  });
+
+  test("stops herdr when the request is cancelled", async () => {
+    const herdr = clientFor({ "agent wait": { hang: true } });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 200);
+    const result = await herdr.waitAgent("reviewer", { timeoutMs: 60_000 }, { signal: controller.signal });
+    assert.equal(errorCode(result), "cancelled");
+  });
+
+  test("caps output size", async () => {
+    const herdr = clientFor({ "agent read": { stdoutBytes: 50_000 } }, { maxOutputBytes: 1_000 });
+    const result = await herdr.readAgent("reviewer", { source: "recent", lines: 10 });
+    assert.equal(errorCode(result), "output_too_large");
+  });
+
+  test("decodes multi-byte characters split across output chunks", async () => {
+    const herdr = clientFor({ "agent read": { stdout: "café → ✓ 🐑", byteByByte: true } });
+    assert.deepEqual(await herdr.readAgent("reviewer", { source: "recent", lines: 10 }), {
+      ok: true,
+      value: "café → ✓ 🐑",
+    });
+  });
+
+  test("validates operands even when called directly", async () => {
+    const herdr = clientFor({});
+    assert.equal(errorCode(await herdr.getAgent("--help")), "invalid_argument");
+    assert.equal(errorCode(await herdr.sendKeys("reviewer", ["-h"])), "invalid_argument");
+    assert.equal(errorCode(await herdr.promptAgent("reviewer", "", { wait: false })), "invalid_argument");
+    assert.deepEqual(fake?.calls(), []);
   });
 });

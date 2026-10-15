@@ -1,441 +1,470 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
-
-export interface HerdrOptions {
-  machine?: string;
-  timeout?: number;
-}
-
-export interface HerdrResult<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: HerdrError;
-}
+/** Error codes produced by herdr-mcp itself. */
+export type ClientErrorCode =
+  | "herdr_not_found"
+  | "spawn_error"
+  | "invalid_argument"
+  | "timeout"
+  | "cancelled"
+  | "output_too_large"
+  | "cli_syntax_error"
+  | "parse_error"
+  | "herdr_exit_error";
 
 export interface HerdrError {
-  code: string;
+  /** A {@link ClientErrorCode}, or a code reported by herdr (e.g. `agent_not_found`, `agent_blocked`). */
+  code: ClientErrorCode | (string & {});
   message: string;
-  details?: unknown;
 }
 
-export interface AgentInfo {
-  agent: string;
-  agent_status: "idle" | "working" | "blocked" | "done" | "unknown";
-  pane_id: string;
-  tab_id: string;
-  workspace_id: string;
-  terminal_title?: string;
-  terminal_title_stripped?: string;
-  cwd?: string;
-  focused?: boolean;
-  revision?: number;
-  state_change_seq?: number;
-  completion_seq?: number;
-  tokens?: Record<string, string>;
-  agent_session?: {
-    agent: string;
-    kind: string;
-    source: string;
-    value: string;
+export type Result<T> = { ok: true; value: T } | { ok: false; error: HerdrError };
+
+export const AGENT_STATUSES = ["idle", "working", "blocked", "done", "unknown"] as const;
+export type AgentStatus = (typeof AGENT_STATUSES)[number];
+
+export const READ_SOURCES = ["visible", "recent", "recent-unwrapped", "detection"] as const;
+export type ReadSource = (typeof READ_SOURCES)[number];
+
+/** Workspace, tab, and pane IDs (`w1`, `w1:t2`, `w1:p3`) and agent targets (a name or a pane ID). */
+export const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+/** herdr's rule for agent names. */
+export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+export const AGENT_KIND_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+/** One herdr key combo (`enter`, `ctrl+c`, `y`); printable ASCII that cannot be read as a flag. */
+export const KEY_PATTERN = /^[!-,.-~][!-~]{0,31}$/;
+/** herdr resolves `~` on the server side, which matters for remote machines. */
+export const CWD_PATTERN = /^[/~][^\u0000-\u001f\u007f]{0,4095}$/;
+export const LABEL_PATTERN = /^[^\u0000-\u001f\u007f]{1,128}$/;
+
+/** Linux caps a single argv entry at 128 KiB; 30k chars stays under it even at 4 bytes per char. */
+export const MAX_PROMPT_CHARS = 30_000;
+export const MAX_WAIT_MS = 300_000;
+export const MAX_READ_LINES = 500;
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+/** Slack on top of a timeout herdr enforces itself, so herdr's own `timeout` error wins the race. */
+const HERDR_TIMEOUT_SLACK_MS = 5_000;
+/** herdr's default agent startup timeout is 30s. */
+const AGENT_START_TIMEOUT_MS = 45_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+const DEFAULT_KILL_GRACE_MS = 2_000;
+const MAX_MESSAGE_CHARS = 2_000;
+
+export interface HerdrClientOptions {
+  /** Path or name of the herdr executable. Default: `herdr` on PATH. */
+  bin?: string;
+  /** Saved machine label or profile ID, passed as herdr's `--machine` prefix. */
+  machine?: string;
+  /** Per-stream cap; herdr is killed and `output_too_large` returned when exceeded. */
+  maxOutputBytes?: number;
+  /** Time between SIGTERM and SIGKILL when herdr must be stopped. */
+  killGraceMs?: number;
+  /** Process timeout for commands herdr does not time out itself. */
+  defaultTimeoutMs?: number;
+}
+
+export interface CallOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * Typed access to the herdr CLI.
+ *
+ * Every method builds an argv array (never a shell string), validates
+ * positional operands so they cannot be parsed as flags, bounds runtime and
+ * output size, and maps herdr's exit codes and JSON error envelopes to a
+ * {@link Result}. JSON commands resolve to herdr's `result` payload.
+ */
+export interface HerdrClient {
+  status(call?: CallOptions): Promise<Result<unknown>>;
+  listWorkspaces(call?: CallOptions): Promise<Result<unknown>>;
+  listTabs(params: { workspaceId?: string }, call?: CallOptions): Promise<Result<unknown>>;
+  listPanes(params: { workspaceId?: string }, call?: CallOptions): Promise<Result<unknown>>;
+  listAgents(call?: CallOptions): Promise<Result<unknown>>;
+  getAgent(target: string, call?: CallOptions): Promise<Result<unknown>>;
+  /** Resolves to the terminal text herdr prints. */
+  readAgent(
+    target: string,
+    params: { source: ReadSource; lines: number },
+    call?: CallOptions
+  ): Promise<Result<string>>;
+  waitAgent(
+    target: string,
+    params: { until?: AgentStatus; timeoutMs: number },
+    call?: CallOptions
+  ): Promise<Result<unknown>>;
+  createTab(
+    params: { workspaceId?: string; cwd?: string; label?: string; focus?: boolean },
+    call?: CallOptions
+  ): Promise<Result<unknown>>;
+  startAgent(
+    params: { name: string; kind: string; paneId: string; agentArgs?: string[] },
+    call?: CallOptions
+  ): Promise<Result<unknown>>;
+  promptAgent(
+    target: string,
+    text: string,
+    params: { wait: false } | { wait: true; timeoutMs: number },
+    call?: CallOptions
+  ): Promise<Result<unknown>>;
+  sendKeys(target: string, keys: string[], call?: CallOptions): Promise<Result<unknown>>;
+  renameAgent(target: string, newName: string, call?: CallOptions): Promise<Result<unknown>>;
+  closePane(paneId: string, call?: CallOptions): Promise<Result<unknown>>;
+}
+
+type Check = [label: string, value: string, pattern: RegExp];
+
+export function createHerdrClient(options: HerdrClientOptions = {}): HerdrClient {
+  const bin = options.bin ?? "herdr";
+  const prefix = options.machine === undefined ? [] : ["--machine", options.machine];
+  const runner: RunnerOptions = {
+    maxOutputBytes: options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+    killGraceMs: options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+  };
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  function json(
+    args: string[],
+    checks: Check[],
+    call: CallOptions | undefined,
+    timeoutMs = defaultTimeoutMs
+  ): Promise<Result<unknown>> {
+    const invalid = validate(checks);
+    if (invalid) return Promise.resolve(invalid);
+    return runHerdr(bin, [...prefix, ...args], { ...runner, timeoutMs, signal: call?.signal }).then(
+      (run) => (run.ok ? parseJsonResponse(run.value.stdout) : run)
+    );
+  }
+
+  return {
+    // `status` without a scope is a local-only command; herdr forwards only `status server`.
+    status: (call) =>
+      json(options.machine === undefined ? ["status", "--json"] : ["status", "server", "--json"], [], call),
+
+    listWorkspaces: (call) => json(["workspace", "list"], [], call),
+
+    listTabs: ({ workspaceId }, call) =>
+      json(["tab", "list", ...optional("--workspace", workspaceId)], idCheck("workspace_id", workspaceId), call),
+
+    listPanes: ({ workspaceId }, call) =>
+      json(["pane", "list", ...optional("--workspace", workspaceId)], idCheck("workspace_id", workspaceId), call),
+
+    listAgents: (call) => json(["agent", "list"], [], call),
+
+    getAgent: (target, call) => json(["agent", "get", target], [["agent", target, ID_PATTERN]], call),
+
+    readAgent: async (target, { source, lines }, call) => {
+      const invalid = validate([["agent", target, ID_PATTERN]]) ?? checkInt("lines", lines, 1, MAX_READ_LINES);
+      if (invalid) return invalid;
+      const run = await runHerdr(
+        bin,
+        [...prefix, "agent", "read", target, "--source", source, "--lines", String(lines)],
+        { ...runner, timeoutMs: defaultTimeoutMs, signal: call?.signal }
+      );
+      return run.ok ? { ok: true, value: run.value.stdout } : run;
+    },
+
+    waitAgent: (target, { until, timeoutMs }, call) => {
+      const invalid = checkInt("timeout_ms", timeoutMs, 1, MAX_WAIT_MS);
+      if (invalid) return Promise.resolve(invalid);
+      return json(
+        ["agent", "wait", target, ...optional("--until", until), "--timeout", String(timeoutMs)],
+        [["agent", target, ID_PATTERN]],
+        call,
+        timeoutMs + HERDR_TIMEOUT_SLACK_MS
+      );
+    },
+
+    createTab: ({ workspaceId, cwd, label, focus }, call) =>
+      json(
+        [
+          "tab",
+          "create",
+          ...optional("--workspace", workspaceId),
+          ...optional("--cwd", cwd),
+          ...optional("--label", label),
+          focus ? "--focus" : "--no-focus",
+        ],
+        [
+          ...idCheck("workspace_id", workspaceId),
+          ...(cwd === undefined ? [] : [["cwd", cwd, CWD_PATTERN] as Check]),
+          ...(label === undefined ? [] : [["name", label, LABEL_PATTERN] as Check]),
+        ],
+        call
+      ),
+
+    startAgent: ({ name, kind, paneId, agentArgs = [] }, call) => {
+      if (agentArgs.some((arg) => arg.includes("\u0000"))) {
+        return Promise.resolve(failure("invalid_argument", "agent_args must not contain NUL characters"));
+      }
+      return json(
+        [
+          "agent",
+          "start",
+          name,
+          "--kind",
+          kind,
+          "--pane",
+          paneId,
+          ...(agentArgs.length > 0 ? ["--", ...agentArgs] : []),
+        ],
+        [
+          ["name", name, AGENT_NAME_PATTERN],
+          ["kind", kind, AGENT_KIND_PATTERN],
+          ["pane_id", paneId, ID_PATTERN],
+        ],
+        call,
+        AGENT_START_TIMEOUT_MS
+      );
+    },
+
+    promptAgent: (target, text, params, call) => {
+      // herdr reads the text operand verbatim, so flag-shaped prompts stay text;
+      // our own flags must come after it.
+      if (text.length === 0 || text.length > MAX_PROMPT_CHARS || text.includes("\u0000")) {
+        return Promise.resolve(
+          failure("invalid_argument", `prompt must be 1-${MAX_PROMPT_CHARS} characters without NUL`)
+        );
+      }
+      if (params.wait) {
+        const invalid = checkInt("timeout_ms", params.timeoutMs, 1, MAX_WAIT_MS);
+        if (invalid) return Promise.resolve(invalid);
+      }
+      return json(
+        [
+          "agent",
+          "prompt",
+          target,
+          text,
+          // herdr rejects --timeout unless --wait is present.
+          ...(params.wait ? ["--wait", "--timeout", String(params.timeoutMs)] : []),
+        ],
+        [["agent", target, ID_PATTERN]],
+        call,
+        params.wait ? params.timeoutMs + HERDR_TIMEOUT_SLACK_MS : defaultTimeoutMs
+      );
+    },
+
+    sendKeys: (target, keys, call) => {
+      if (keys.length === 0) return Promise.resolve(failure("invalid_argument", "keys must not be empty"));
+      return json(
+        ["agent", "send-keys", target, ...keys],
+        [["agent", target, ID_PATTERN], ...keys.map((key): Check => ["key", key, KEY_PATTERN])],
+        call
+      );
+    },
+
+    renameAgent: (target, newName, call) =>
+      json(
+        ["agent", "rename", target, newName],
+        [
+          ["agent", target, ID_PATTERN],
+          ["new_name", newName, AGENT_NAME_PATTERN],
+        ],
+        call
+      ),
+
+    closePane: (paneId, call) => json(["pane", "close", paneId], [["pane_id", paneId, ID_PATTERN]], call),
   };
 }
 
-export interface AgentListResult {
-  type: "agent_list";
-  agents: AgentInfo[];
+function optional(flag: string, value: string | undefined): string[] {
+  return value === undefined ? [] : [flag, value];
 }
 
-export interface WorkspaceInfo {
-  workspace_id: string;
-  name?: string;
-  focused?: boolean;
+function idCheck(label: string, value: string | undefined): Check[] {
+  return value === undefined ? [] : [[label, value, ID_PATTERN]];
 }
 
-export interface TabInfo {
-  tab_id: string;
-  workspace_id: string;
-  name?: string;
-  focused?: boolean;
-}
-
-export interface PaneInfo {
-  pane_id: string;
-  tab_id: string;
-  workspace_id: string;
-  focused?: boolean;
-  cwd?: string;
-}
-
-export interface StatusInfo {
-  server?: {
-    running: boolean;
-    version?: string;
-    session?: string;
-  };
-  client?: {
-    version?: string;
-  };
-}
-
-export interface AgentReadResult {
-  content: string;
-  source: string;
-  lines: number;
-}
-
-export interface TabCreateResult {
-  tab: TabInfo;
-  root_pane: PaneInfo;
-}
-
-export interface AgentStartResult {
-  agent: AgentInfo;
-}
-
-export interface AgentPromptResult {
-  success: boolean;
-  agent?: AgentInfo;
-}
-
-export interface AgentWaitResult {
-  agent: AgentInfo;
-  settled: boolean;
-}
-
-function parseHerdrResponse<T>(stdout: string): HerdrResult<T> {
-  try {
-    const parsed = JSON.parse(stdout);
-    if (parsed.error) {
-      return {
-        success: false,
-        error: {
-          code: parsed.error.code || "herdr_error",
-          message: parsed.error.message || "Unknown herdr error",
-          details: parsed.error,
-        },
-      };
+function validate(checks: Check[]): { ok: false; error: HerdrError } | undefined {
+  for (const [label, value, pattern] of checks) {
+    if (!pattern.test(value)) {
+      return failure("invalid_argument", `Invalid ${label}: ${JSON.stringify(truncate(value, 80))}`);
     }
-    if (parsed.result !== undefined) {
-      return { success: true, data: parsed.result as T };
-    }
-    return { success: true, data: parsed as T };
-  } catch {
-    return {
-      success: false,
-      error: {
-        code: "parse_error",
-        message: "Failed to parse herdr response",
-        details: stdout,
-      },
-    };
   }
+  return undefined;
 }
 
-function parseHerdrStderr(stderr: string): HerdrError | null {
-  if (!stderr.trim()) return null;
+function checkInt(label: string, value: number, min: number, max: number) {
+  return Number.isInteger(value) && value >= min && value <= max
+    ? undefined
+    : failure("invalid_argument", `${label} must be an integer from ${min} to ${max}`);
+}
+
+function failure(code: HerdrError["code"], message: string): { ok: false; error: HerdrError } {
+  return { ok: false, error: { code, message } };
+}
+
+function truncate(text: string, max = MAX_MESSAGE_CHARS): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** herdr prints `{"id","result"}` or `{"id","error":{"code","message"}}`; `status` prints a bare object. */
+function parseJsonResponse(stdout: string): Result<unknown> {
+  if (stdout.trim() === "") return { ok: true, value: null };
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(stderr);
-    return {
-      code: parsed.code || "herdr_stderr_error",
-      message: parsed.message || stderr,
-      details: parsed,
-    };
+    parsed = JSON.parse(stdout);
   } catch {
-    return {
-      code: "herdr_stderr",
-      message: stderr.trim(),
-    };
+    return failure("parse_error", `herdr returned non-JSON output: ${truncate(stdout.trim(), 200)}`);
   }
+  const envelopeError = readErrorEnvelope(parsed);
+  if (envelopeError) return { ok: false, error: envelopeError };
+  if (isRecord(parsed) && "result" in parsed) return { ok: true, value: parsed.result };
+  return { ok: true, value: parsed };
 }
 
-export async function execHerdr<T = unknown>(
-  args: string[],
-  options: HerdrOptions = {}
-): Promise<HerdrResult<T>> {
-  const { machine, timeout = DEFAULT_TIMEOUT_MS } = options;
-
-  const fullArgs: string[] = [];
-  if (machine) {
-    fullArgs.push("--machine", machine);
+function readErrorEnvelope(parsed: unknown): HerdrError | undefined {
+  if (!isRecord(parsed) || !isRecord(parsed.error) || typeof parsed.error.code !== "string") {
+    return undefined;
   }
-  fullArgs.push(...args);
+  const message = typeof parsed.error.message === "string" ? parsed.error.message : parsed.error.code;
+  return { code: parsed.error.code, message: truncate(message) };
+}
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface RunnerOptions {
+  maxOutputBytes: number;
+  killGraceMs: number;
+}
+
+interface RunOptions extends RunnerOptions {
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Runs herdr once and interprets its exit status:
+ * 0 is success, 1 carries a JSON error envelope on stderr, 2 is a usage error.
+ */
+function runHerdr(bin: string, args: string[], options: RunOptions): Promise<Result<{ stdout: string }>> {
   return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
+    let child: ChildProcess;
+    try {
+      child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], shell: false, windowsHide: true });
+    } catch (err) {
+      resolve(failure("spawn_error", err instanceof Error ? err.message : String(err)));
+      return;
+    }
 
-    const child = spawn("herdr", fullArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
-    });
+    const stdout = new BoundedBuffer(options.maxOutputBytes);
+    const stderr = new BoundedBuffer(options.maxOutputBytes);
+    let stopReason: HerdrError | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let settled = false;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const finish = (result: Result<{ stdout: string }>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve(result);
+    };
+
+    const stop = (reason: HerdrError) => {
+      if (stopReason) return;
+      stopReason = reason;
+      if (child.exitCode !== null || child.signalCode !== null) {
+        finish({ ok: false, error: reason });
+        return;
+      }
       child.kill("SIGTERM");
-    }, timeout);
+      killTimer = setTimeout(() => child.kill("SIGKILL"), options.killGraceMs);
+    };
 
-    child.stdout.on("data", (data) => {
-      stdout += data.toString();
+    const timeoutTimer = setTimeout(
+      () => stop({ code: "timeout", message: `herdr did not finish within ${options.timeoutMs}ms` }),
+      options.timeoutMs
+    );
+    const onAbort = () => stop({ code: "cancelled", message: "The request was cancelled" });
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
+
+    const tooLarge: HerdrError = {
+      code: "output_too_large",
+      message: `herdr output exceeded ${options.maxOutputBytes} bytes; request less output (e.g. fewer lines)`,
+    };
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk) || stop(tooLarge));
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk) || stop(tooLarge));
+
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      finish(
+        err.code === "ENOENT"
+          ? failure("herdr_not_found", "herdr binary not found in PATH. Install herdr from https://herdr.dev")
+          : failure("spawn_error", err.message)
+      );
     });
 
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
+    // A stopped herdr may leave a grandchild (e.g. ssh) holding the pipes open, so
+    // don't wait for "close" once we've decided to stop.
+    child.on("exit", () => {
+      if (stopReason) finish({ ok: false, error: stopReason });
     });
 
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        resolve({
-          success: false,
-          error: {
-            code: "herdr_not_found",
-            message:
-              "herdr binary not found in PATH. Install herdr from https://herdr.dev",
-          },
-        });
-      } else {
-        resolve({
-          success: false,
-          error: {
-            code: "spawn_error",
-            message: err.message,
-          },
-        });
-      }
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-
-      if (timedOut) {
-        resolve({
-          success: false,
-          error: {
-            code: "timeout",
-            message: `herdr command timed out after ${timeout}ms`,
-          },
-        });
+    child.on("close", (code, signal) => {
+      if (stopReason) {
+        finish({ ok: false, error: stopReason });
         return;
       }
-
-      if (code === 2) {
-        resolve({
-          success: false,
-          error: {
-            code: "cli_syntax_error",
-            message: stderr.trim() || "CLI syntax error",
-          },
-        });
-        return;
-      }
-
-      if (code === 1) {
-        const stderrError = parseHerdrStderr(stderr);
-        if (stderrError) {
-          resolve({ success: false, error: stderrError });
-          return;
-        }
-      }
-
-      if (stdout.trim()) {
-        resolve(parseHerdrResponse<T>(stdout));
-      } else if (code !== 0) {
-        resolve({
-          success: false,
-          error: {
-            code: "herdr_exit_error",
-            message: stderr.trim() || `herdr exited with code ${code}`,
-          },
-        });
-      } else {
-        resolve({ success: true });
-      }
+      finish(interpretExit(code, signal, stdout.text(), stderr.text()));
     });
   });
 }
 
-export async function getStatus(
-  options: HerdrOptions = {}
-): Promise<HerdrResult<StatusInfo>> {
-  return execHerdr<StatusInfo>(["status", "--json"], options);
-}
-
-export async function listWorkspaces(
-  options: HerdrOptions = {}
-): Promise<HerdrResult<{ workspaces: WorkspaceInfo[] }>> {
-  return execHerdr<{ workspaces: WorkspaceInfo[] }>(
-    ["workspace", "list", "--json"],
-    options
-  );
-}
-
-export async function listTabs(
-  workspaceId: string | undefined,
-  options: HerdrOptions = {}
-): Promise<HerdrResult<{ tabs: TabInfo[] }>> {
-  const args = ["tab", "list", "--json"];
-  if (workspaceId) {
-    args.push("--workspace", workspaceId);
+function interpretExit(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  stdout: string,
+  stderr: string
+): Result<{ stdout: string }> {
+  if (code === 0) return { ok: true, value: { stdout } };
+  if (code === 2) {
+    return failure("cli_syntax_error", truncate(stderr.trim()) || "herdr rejected the command arguments");
   }
-  return execHerdr<{ tabs: TabInfo[] }>(args, options);
+  const envelope = parseErrorEnvelopeText(stderr) ?? parseErrorEnvelopeText(stdout);
+  if (envelope) return { ok: false, error: envelope };
+  const detail = truncate(stderr.trim());
+  if (code === null) {
+    return failure("herdr_exit_error", detail || `herdr was terminated by ${signal ?? "a signal"}`);
+  }
+  return failure("herdr_exit_error", detail || `herdr exited with code ${code}`);
 }
 
-export async function listPanes(
-  workspaceId: string | undefined,
-  options: HerdrOptions = {}
-): Promise<HerdrResult<{ panes: PaneInfo[] }>> {
-  const args = ["pane", "list", "--json"];
-  if (workspaceId) {
-    args.push("--workspace", workspaceId);
+function parseErrorEnvelopeText(text: string): HerdrError | undefined {
+  if (text.trim() === "") return undefined;
+  try {
+    return readErrorEnvelope(JSON.parse(text));
+  } catch {
+    return undefined;
   }
-  return execHerdr<{ panes: PaneInfo[] }>(args, options);
 }
 
-export async function listAgents(
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentListResult>> {
-  return execHerdr<AgentListResult>(["agent", "list"], options);
-}
+/** Collects raw bytes so multi-byte UTF-8 characters split across chunks decode correctly. */
+class BoundedBuffer {
+  private chunks: Buffer[] = [];
+  private size = 0;
 
-export async function getAgent(
-  agentNameOrPaneId: string,
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentInfo>> {
-  return execHerdr<AgentInfo>(["agent", "get", agentNameOrPaneId], options);
-}
+  constructor(private readonly limit: number) {}
 
-export async function readAgent(
-  agentNameOrPaneId: string,
-  params: {
-    source?: "visible" | "recent" | "recent-unwrapped" | "detection";
-    lines?: number;
-    format?: "text" | "ansi";
-  } = {},
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentReadResult>> {
-  const args = ["agent", "read", agentNameOrPaneId];
-  if (params.source) {
-    args.push("--source", params.source);
+  /** Returns false once the limit is exceeded; further data is discarded. */
+  push(chunk: Buffer): boolean {
+    if (this.size + chunk.length > this.limit) {
+      this.size = this.limit + 1;
+      return false;
+    }
+    this.chunks.push(chunk);
+    this.size += chunk.length;
+    return true;
   }
-  if (params.lines !== undefined) {
-    args.push("--lines", String(params.lines));
-  }
-  if (params.format) {
-    args.push("--format", params.format);
-  }
-  return execHerdr<AgentReadResult>(args, options);
-}
 
-export async function waitAgent(
-  agentNameOrPaneId: string,
-  params: {
-    until?: "idle" | "working" | "blocked" | "done";
-    timeout?: number;
-  } = {},
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentWaitResult>> {
-  const args = ["agent", "wait", agentNameOrPaneId];
-  if (params.until) {
-    args.push("--until", params.until);
+  text(): string {
+    return Buffer.concat(this.chunks).toString("utf8");
   }
-  if (params.timeout !== undefined) {
-    args.push("--timeout", String(params.timeout));
-  }
-  const waitTimeout = params.timeout ? params.timeout + 5000 : 120_000;
-  return execHerdr<AgentWaitResult>(args, { ...options, timeout: waitTimeout });
-}
-
-export async function createTab(
-  workspaceId: string | undefined,
-  params: {
-    cwd?: string;
-    name?: string;
-    noFocus?: boolean;
-  } = {},
-  options: HerdrOptions = {}
-): Promise<HerdrResult<TabCreateResult>> {
-  const args = ["tab", "create"];
-  if (workspaceId) {
-    args.push("--workspace", workspaceId);
-  }
-  if (params.cwd) {
-    args.push("--cwd", params.cwd);
-  }
-  if (params.name) {
-    args.push("--name", params.name);
-  }
-  if (params.noFocus) {
-    args.push("--no-focus");
-  }
-  return execHerdr<TabCreateResult>(args, options);
-}
-
-export async function startAgent(
-  name: string,
-  kind: string,
-  paneId: string,
-  agentArgs: string[] = [],
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentStartResult>> {
-  const args = ["agent", "start", name, "--kind", kind, "--pane", paneId];
-  if (agentArgs.length > 0) {
-    args.push("--", ...agentArgs);
-  }
-  return execHerdr<AgentStartResult>(args, { ...options, timeout: 60_000 });
-}
-
-export async function promptAgent(
-  agentNameOrPaneId: string,
-  prompt: string,
-  params: {
-    wait?: boolean;
-    timeout?: number;
-  } = {},
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentPromptResult>> {
-  const args = ["agent", "prompt", agentNameOrPaneId, prompt];
-  if (params.wait) {
-    args.push("--wait");
-  }
-  if (params.timeout !== undefined) {
-    args.push("--timeout", String(params.timeout));
-  }
-  const waitTimeout = params.timeout ? params.timeout + 5000 : 120_000;
-  return execHerdr<AgentPromptResult>(args, { ...options, timeout: waitTimeout });
-}
-
-export async function sendKeysToAgent(
-  agentNameOrPaneId: string,
-  keys: string,
-  options: HerdrOptions = {}
-): Promise<HerdrResult<void>> {
-  return execHerdr<void>(["agent", "send-keys", agentNameOrPaneId, keys], options);
-}
-
-export async function renameAgent(
-  agentNameOrPaneId: string,
-  newName: string,
-  options: HerdrOptions = {}
-): Promise<HerdrResult<AgentInfo>> {
-  return execHerdr<AgentInfo>(
-    ["agent", "rename", agentNameOrPaneId, newName],
-    options
-  );
-}
-
-export async function closePane(
-  paneId: string,
-  options: HerdrOptions = {}
-): Promise<HerdrResult<void>> {
-  return execHerdr<void>(["pane", "close", paneId], options);
-}
-
-export function isWriteAllowed(): boolean {
-  return process.env.HERDR_MCP_ALLOW_WRITE === "1";
-}
-
-export function getMachineFromEnv(): string | undefined {
-  return process.env.HERDR_MCP_MACHINE;
 }
