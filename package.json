@@ -16,7 +16,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/herdrdev/herdr-mcp.git"
+    "url": "https://github.com/sunnyvempati/herdr-mcp.git"
+  },
+  "homepage": "https://github.com/sunnyvempati/herdr-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/sunnyvempati/herdr-mcp/issues"
   },
   "keywords": [
     "mcp",
@@ -49,7 +53,9 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^22.0.0",
+    "sharp": "^0.35.5",
     "typescript": "^5.0.0"
   }
 }
