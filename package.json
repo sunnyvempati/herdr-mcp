@@ -30,7 +30,14 @@
   "author": "",
   "license": "MIT",
   "files": [
-    "build",
+    "build/index.js",
+    "build/index.js.map",
+    "build/index.d.ts",
+    "build/index.d.ts.map",
+    "build/herdr.js",
+    "build/herdr.js.map",
+    "build/herdr.d.ts",
+    "build/herdr.d.ts.map",
     "README.md",
     "LICENSE"
   ],
@@ -38,8 +45,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^1.0.0",
-    "zod": "^3.24.0"
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -29,6 +29,16 @@ This server lets AI assistants (Grok Bot, Cursor, Claude, etc.) see which agents
 - [herdr](https://herdr.dev) installed and running (`herdr` in PATH)
 - Node.js 20+
 
+## Smoke Test
+
+Run the smoke test on a Mac with herdr installed:
+
+```bash
+./scripts/smoke.sh
+```
+
+This exercises each read-only tool end-to-end against your running herdr session.
+
 ## Installation
 
 ```bash

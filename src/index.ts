@@ -74,7 +74,7 @@ function createServer() {
     {
       description:
         "Get the status of the herdr server and client. Returns whether the server is running, the version, and session info. Use this first to verify herdr is running before other commands.",
-      inputSchema: z.object({}),
+      inputSchema: {},
     },
     async () => {
       const result = await herdr.getStatus(getHerdrOptions());
@@ -87,7 +87,7 @@ function createServer() {
     {
       description:
         "List all workspaces in the herdr session. Each workspace is a project-level container that owns tabs and panes. The sidebar rolls agent states up per workspace.",
-      inputSchema: z.object({}),
+      inputSchema: {},
     },
     async () => {
       const result = await herdr.listWorkspaces(getHerdrOptions());
@@ -100,14 +100,14 @@ function createServer() {
     {
       description:
         "List tabs in a workspace. Tabs are layout containers inside a workspace for separating views like agents, logs, or servers. Each tab contains one or more panes.",
-      inputSchema: z.object({
+      inputSchema: {
         workspace_id: z
           .string()
           .optional()
           .describe(
             "Workspace ID (e.g. 'w1'). If omitted, lists tabs across all workspaces."
           ),
-      }),
+      },
     },
     async ({ workspace_id }) => {
       const result = await herdr.listTabs(workspace_id, getHerdrOptions());
@@ -120,14 +120,14 @@ function createServer() {
     {
       description:
         "List panes in a workspace. A pane is a real terminal that survives client detach. Panes can contain shell prompts, running processes, or AI coding agents.",
-      inputSchema: z.object({
+      inputSchema: {
         workspace_id: z
           .string()
           .optional()
           .describe(
             "Workspace ID (e.g. 'w1'). If omitted, lists panes across all workspaces."
           ),
-      }),
+      },
     },
     async ({ workspace_id }) => {
       const result = await herdr.listPanes(workspace_id, getHerdrOptions());
@@ -140,7 +140,7 @@ function createServer() {
     {
       description:
         "List all recognized AI coding agents running in herdr panes. Returns each agent's name, status (idle/working/blocked/done/unknown), pane_id, workspace_id, and other metadata. This is the primary tool for monitoring agent activity.",
-      inputSchema: z.object({}),
+      inputSchema: {},
     },
     async () => {
       const result = await herdr.listAgents(getHerdrOptions());
@@ -153,13 +153,13 @@ function createServer() {
     {
       description:
         "Get detailed information about a specific agent. Returns the agent's current status, pane location, working directory, terminal title, and session info.",
-      inputSchema: z.object({
+      inputSchema: {
         agent: z
           .string()
           .describe(
             "Agent name (e.g. 'reviewer') or pane ID (e.g. 'w1:p1') hosting the agent."
           ),
-      }),
+      },
     },
     async ({ agent }) => {
       const result = await herdr.getAgent(agent, getHerdrOptions());
@@ -172,7 +172,7 @@ function createServer() {
     {
       description:
         "Read recent output from an agent's terminal. Use this to see what an agent has been doing, check for errors, or read its responses. Returns terminal content as text.",
-      inputSchema: z.object({
+      inputSchema: {
         agent: z
           .string()
           .describe(
@@ -193,7 +193,7 @@ function createServer() {
           .describe(
             "Number of lines to read (1-500). Default: 60. More lines can be requested but may be limited by available scrollback."
           ),
-      }),
+      },
     },
     async ({ agent, source, lines }) => {
       const result = await herdr.readAgent(
@@ -210,7 +210,7 @@ function createServer() {
     {
       description:
         "Wait for an agent to reach a specific state or settle. Without 'until', waits for the agent to settle to idle, done, or blocked. With 'until', waits for that specific state. Returns the agent info when the wait completes.",
-      inputSchema: z.object({
+      inputSchema: {
         agent: z
           .string()
           .describe(
@@ -231,7 +231,7 @@ function createServer() {
           .describe(
             "Timeout in milliseconds (max 300000 = 5 min). Default: 120000 (2 min)."
           ),
-      }),
+      },
     },
     async ({ agent, until, timeout_ms }) => {
       const result = await herdr.waitAgent(
@@ -252,7 +252,7 @@ function createServer() {
     {
       description:
         "Create a new tab in a workspace. Returns the new tab and its root pane. The root pane starts with an empty shell prompt, ready for agent start or commands. WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.",
-      inputSchema: z.object({
+      inputSchema: {
         workspace_id: z
           .string()
           .optional()
@@ -270,7 +270,7 @@ function createServer() {
           .boolean()
           .optional()
           .describe("If true, do not focus the new tab. Default: false."),
-      }),
+      },
     },
     async ({ workspace_id, cwd, name, no_focus }) => {
       if (!herdr.isWriteAllowed()) return writeNotAllowed();
@@ -295,7 +295,7 @@ Common workflow:
 4. herdr_agent_wait or herdr_agent_read to monitor
 
 WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
-      inputSchema: z.object({
+      inputSchema: {
         name: z
           .string()
           .regex(/^[a-z][a-z0-9_-]{0,31}$/)
@@ -318,7 +318,7 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
           .describe(
             "Optional arguments passed to the agent after '--'. These are native agent arguments."
           ),
-      }),
+      },
     },
     async ({ name, kind, pane_id, agent_args }) => {
       if (!herdr.isWriteAllowed()) return writeNotAllowed();
@@ -341,7 +341,7 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
 If the agent is blocked (waiting at an approval dialog), this will fail with 'agent_blocked'. Check the agent's output first and handle the block.
 
 WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
-      inputSchema: z.object({
+      inputSchema: {
         agent: z
           .string()
           .describe(
@@ -363,7 +363,7 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
           .describe(
             "Timeout in milliseconds when wait=true (max 300000 = 5 min). Default: 120000 (2 min)."
           ),
-      }),
+      },
     },
     async ({ agent, prompt, wait, timeout_ms }) => {
       if (!herdr.isWriteAllowed()) return writeNotAllowed();
@@ -389,7 +389,7 @@ Common uses:
 - 'enter' - confirm
 
 WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
-      inputSchema: z.object({
+      inputSchema: {
         agent: z
           .string()
           .describe(
@@ -400,7 +400,7 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
           .describe(
             "Key sequence to send. Examples: 'esc', 'ctrl+c', 'enter', 'y', 'n'. Multiple keys can be space-separated."
           ),
-      }),
+      },
     },
     async ({ agent, keys }) => {
       if (!herdr.isWriteAllowed()) return writeNotAllowed();
@@ -414,7 +414,7 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
     {
       description:
         "Rename an agent. The new name must be unique among live agents. WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.",
-      inputSchema: z.object({
+      inputSchema: {
         agent: z
           .string()
           .describe(
@@ -426,7 +426,7 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
           .describe(
             "New agent name (lowercase, starts with letter, max 32 chars). Must be unique among live agents."
           ),
-      }),
+      },
     },
     async ({ agent, new_name }) => {
       if (!herdr.isWriteAllowed()) return writeNotAllowed();
@@ -440,9 +440,9 @@ WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.`,
     {
       description:
         "Close a pane and terminate any process running in it. Use with caution - this will kill any agent or process in the pane. WRITE OPERATION: Requires HERDR_MCP_ALLOW_WRITE=1.",
-      inputSchema: z.object({
+      inputSchema: {
         pane_id: z.string().describe("Pane ID to close (e.g. 'w1:p1')."),
-      }),
+      },
     },
     async ({ pane_id }) => {
       if (!herdr.isWriteAllowed()) return writeNotAllowed();
